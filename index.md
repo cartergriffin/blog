@@ -25,7 +25,7 @@ https://learn.microsoft.com/en-us/powershell/gallery/how-to/working-with-local-p
 This one documents creating the actual asp.net core nuget.server app (up to the point of publishing packages per the first article, where it is linked) -  
 https://learn.microsoft.com/en-us/nuget/hosting-packages/nuget-server  
 
-# get visual studio
+## get visual studio
 
 On windows, install visual studio community edition like this if you don't have it, (or enterprise by swapping community -> enterprise) like this:
 
