@@ -33,3 +33,6 @@ On windows, install visual studio community edition like this if you don't have 
 
 Once that is installed, follow the instructions in the nuget-server msft learn link. I thought this would be easy myself, but I had never published an application via visual studio before, so got a little stuck on step 9, "Once you've tested your local deployment, deploy the application to any other internal or external site as needed.". Uh, draw the rest of the owl much? Kidding aside I really had no idea what to do, and copying the files from my workstation to a server, I ran into 500 error when launching the site via iis first time, so I had to mess around with it a bit until I figured it out. 
 # todo : finish drawing rest of owl
+# rest of owl
+
+Ok. I kind of brute force followed docs and built with gui. It is probably better to build automatically somehow.
