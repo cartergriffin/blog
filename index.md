@@ -18,4 +18,4 @@ GPOs are slow and fail often without much in the way of centralized alerting. Si
 
 ## Enter nuget server
 
-While old and with docs that leave something to be desired, the internal nuget server that Microsoft still officially supports is a fantastic way to achieve PSGallery functionality for internal network. It is also very straightforward to hook up to Azure Devops for end-to-end publishing on commits. 
+While old and with docs that leave something to be desired, the internal nuget server that Microsoft still officially supports is a fantastic way to achieve PSGallery functionality for internal network. It is also very straightforward to hook up to Azure Devops for end-to-end publishing on commits. Kevin Marquette wrote a great [blogpost](https://powershellexplained.com/2018-03-03-Powershell-Using-a-NuGet-server-for-a-PSRepository/) several years ago which made this dead simple for me to set up 
