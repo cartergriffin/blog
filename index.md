@@ -18,4 +18,18 @@ GPOs are slow and fail often without much in the way of centralized alerting. Si
 
 ## Enter nuget server
 
-While old and with docs that leave something to be desired, the internal nuget server that Microsoft still officially supports is a fantastic way to achieve PSGallery functionality for internal network. It is also very straightforward to hook up to Azure Devops for end-to-end publishing on commits. Kevin Marquette wrote a great [blogpost](https://powershellexplained.com/2018-03-03-Powershell-Using-a-NuGet-server-for-a-PSRepository/) several years ago which made this dead simple for me to set up 
+While old and with docs that leave something to be desired, the internal nuget server that Microsoft still officially supports is a fantastic way to achieve PSGallery functionality for internal network. It is also very straightforward to hook up to Azure Devops for end-to-end publishing on commits. Kevin Marquette wrote a great [blogpost](https://powershellexplained.com/2018-03-03-Powershell-Using-a-NuGet-server-for-a-PSRepository/) several years ago which made this dead simple for me to set up. Here are the relevant msft learn links -  
+This one documents setting up and publishing the server -  
+https://learn.microsoft.com/en-us/powershell/gallery/how-to/working-with-local-psrepositories?view=powershellget-3.x  
+
+This one documents creating the actual asp.net core nuget.server app (up to the point of publishing packages per the first article, where it is linked) -  
+https://learn.microsoft.com/en-us/nuget/hosting-packages/nuget-server  
+
+# get visual studio
+
+On windows, install visual studio community edition like this if you don't have it, (or enterprise by swapping community -> enterprise) like this:
+
+    winget install --id Microsoft.VisualStudio.2022.Community
+
+Once that is installed, follow the instructions in the nuget-server msft learn link. I thought this would be easy myself, but I had never published an application via visual studio before, so got a little stuck on step 9, "Once you've tested your local deployment, deploy the application to any other internal or external site as needed.". Uh, draw the rest of the owl much? Kidding aside I really had no idea what to do, and copying the files from my workstation to a server, I ran into 500 error when launching the site via iis first time, so I had to mess around with it a bit until I figured it out. 
+# todo : finish drawing rest of owl
