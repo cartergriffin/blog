@@ -1,43 +1,61 @@
 # blog
 
-Source for <https://cartergriffin.github.io/blog/>.
+Source for <https://cartergriffin.github.io/blog/>. Built with [Hugo](https://gohugo.io/), deployed by GitHub Actions to GitHub Pages.
 
-## How it's built and published
+## How it builds and deploys
 
-- **Engine:** GitHub Pages' built-in Jekyll build ("Deploy from a branch", `main`, root `/`). There is no Actions workflow in this repo; GitHub builds and publishes the site on every push to `main`. Build status shows under the repo's Actions tab as "pages build and deployment".
-- **Theme:** [minima](https://github.com/jekyll/minima), set by `theme:` in `_config.yml`. It is one of the themes GitHub Pages supports natively, so no Gemfile is needed.
-- **Plugins:** `jekyll-feed` (Atom feed at `/blog/feed.xml`) and `jekyll-seo-tag` (meta and Open Graph tags, used for LinkedIn link previews). Both are on GitHub Pages' allow-list.
-- **URL settings:** `url` and `baseurl` in `_config.yml` must stay `https://cartergriffin.github.io` and `/blog`, because the site is a project page under `/blog/`. If a custom domain is added later, change both.
+- **Workflow:** `.github/workflows/deploy.yml`.
+  - **Every push and PR:** installs Hugo extended at the version pinned in `HUGO_VERSION`, then runs `hugo --gc --minify --panicOnWarning`. Any Hugo warning fails the build, so deprecations get caught in the PR.
+  - **`main` only:** uploads `public/` and deploys it with `actions/deploy-pages`. PRs build but never deploy.
+- **Pages setting:** repo Settings → Pages → Source must be **GitHub Actions** (`build_type: workflow`). With "Deploy from a branch", GitHub would also run its own Jekyll build, and the two would conflict.
+- **Upgrading Hugo:** change `HUGO_VERSION` in the workflow and install the same version locally, so preview matches production.
+
+## Local preview
+
+```powershell
+winget install Hugo.Hugo.Extended   # once
+hugo server                          # http://localhost:1313/blog/ , reloads on save
+```
+
+`hugo --gc --minify --panicOnWarning` runs the exact CI build. Output goes to `public/`, which is gitignored.
 
 ## Layout
 
+The site uses its own small set of templates instead of a third-party theme, so there is no theme dependency to pin or update.
+
 | Path | What it is |
 |------|------------|
-| `_config.yml` | Site title, description, theme, plugins, permalink format (`/:year/:month/:day/:title/`), header nav pages |
-| `index.md` | Home page; minima's `home` layout lists every post, newest first, with excerpts |
-| `about.md` | About page, linked from the header via `header_pages` |
-| `_posts/` | One Markdown file per post |
-| `assets/` | Images and other files referenced from posts, if any |
+| `hugo.toml` | Site config: `baseURL` (must stay `https://cartergriffin.github.io/blog/` for a project page), title, description, nav menu, permalink format, highlighting. `titleCaseStyle = "none"` stops Hugo title-casing tag names. |
+| `content/posts/` | One Markdown file per post. |
+| `content/about.md` | About page. |
+| `layouts/baseof.html` | Page shell: `<head>` (description, canonical URL, Open Graph and Twitter cards for LinkedIn previews, RSS link, CSS), header nav, footer. |
+| `layouts/home.html` | Home page: tagline and every post, newest first. |
+| `layouts/single.html` | Post and page body. Posts get date, reading time and tags. |
+| `layouts/list.html`, `layouts/taxonomy.html` | `/posts/`, per-tag pages, and the `/tags/` index. |
+| `layouts/_partials/post-list.html` | The post list shared by the home, section and tag pages. |
+| `assets/css/main.css` | Site styles. Colours are CSS variables, with light and dark sets switched by `prefers-color-scheme`. |
+| `assets/css/syntax.css` | Generated code highlighting: `github` for light, `github-dark` for dark, each scoped to its colour scheme. Regenerate with the command in the file's header comment if you change styles. |
+
+## URLs
+
+Posts live at `/blog/:year/:month/:day/:slug/`, the same shape the old Jekyll site used, so links already shared keep working. `slug` comes from each post's front matter. Other URLs: `/blog/posts/`, `/blog/tags/<tag>/`, `/blog/about/`, and the RSS feed at `/blog/index.xml`.
 
 ## Writing a post
 
-1. Create `_posts/YYYY-MM-DD-short-slug.md`. The date in the filename sets the URL and sort order.
-2. Start it with front matter:
+1. Create `content/posts/YYYY-MM-DD-short-slug.md` with front matter:
 
    ```yaml
    ---
-   layout: post
    title: "Post title"
-   date: 2026-11-11 09:00:00 -0700
+   date: 2026-11-11T09:00:00-07:00
+   slug: short-slug
    tags: [powershell, group-policy]
-   description: "One sentence used for link previews."
+   description: "One sentence for the home page and link previews."
    ---
    ```
 
-3. Write Markdown below it. The first paragraph is the excerpt on the home page.
-4. Gotcha: Jekyll runs Liquid over every post, so a literal `{{` or `{%` in a code block gets interpreted. Wrap such blocks in `{% raw %}` and `{% endraw %}`.
-5. Merge to `main`. The site updates a minute or two later.
-
-## Previewing locally (optional)
-
-This needs Ruby. Run `gem install bundler github-pages`, then `jekyll serve --baseurl /blog`, and open <http://localhost:4000/blog/>.
+2. Write Markdown below it. Without a `description`, the home page shows the start of the post.
+3. Gotchas:
+   - Hugo skips posts dated in the future, so a post with a later time won't appear until a build runs after that time.
+   - A literal `{{<` or `{{%` in a post is read as a shortcode. Escape it as `{{</*` ... `*/>}}`.
+4. Open a PR. CI builds it. Merging to `main` publishes.
