@@ -1,4 +1,9 @@
-### Azure Devops + Internal Nuget server for powershell module publishing
+---
+title: "Azure Devops + Internal Nuget server for powershell module publishing"
+date: 2026-02-08T20:26:33-07:00
+slug: azure-devops-internal-nuget-server
+tags: [powershell, nuget, azure-devops]
+---
 
 Recently, I found myself needing to distribute code to any windows server host in our environment such that any relevant account local to any host would be able to reliably run my code. Before traversing the internet to figure out how to do this, I considered a couple of low hanging options -
 
