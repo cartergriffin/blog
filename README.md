@@ -1,6 +1,6 @@
 # blog
 
-Source for <https://cartergriffin.github.io/blog/>. Built with [Hugo](https://gohugo.io/), deployed by GitHub Actions to GitHub Pages.
+Source for <https://blog.grifflab.org/>. Built with [Hugo](https://gohugo.io/), deployed by GitHub Actions to GitHub Pages.
 
 ## How it builds and deploys
 
@@ -8,13 +8,14 @@ Source for <https://cartergriffin.github.io/blog/>. Built with [Hugo](https://go
   - **Every push and PR:** installs Hugo extended at the version pinned in `HUGO_VERSION`, then runs `hugo --gc --minify --panicOnWarning`. Any Hugo warning fails the build, so deprecations get caught in the PR.
   - **`main` only:** uploads `public/` and deploys it with `actions/deploy-pages`. PRs build but never deploy.
 - **Pages setting:** repo Settings → Pages → Source must be **GitHub Actions** (`build_type: workflow`). With "Deploy from a branch", GitHub would also run its own Jekyll build, and the two would conflict.
+- **Custom domain:** `blog.grifflab.org`, set in repo Settings → Pages (stored by GitHub, so there's no `CNAME` file in the repo). DNS is a `CNAME` record `blog` → `cartergriffin.github.io` at Porkbun. HTTPS is enforced in the same Pages settings once the certificate is issued. Old `cartergriffin.github.io/blog/...` links redirect to the custom domain.
 - **Upgrading Hugo:** change `HUGO_VERSION` in the workflow and install the same version locally, so preview matches production.
 
 ## Local preview
 
 ```powershell
 winget install Hugo.Hugo.Extended   # once
-hugo server                          # http://localhost:1313/blog/ , reloads on save
+hugo server                          # http://localhost:1313/ , reloads on save
 ```
 
 `hugo --gc --minify --panicOnWarning` runs the exact CI build. Output goes to `public/`, which is gitignored.
@@ -25,7 +26,7 @@ The site uses its own small set of templates instead of a third-party theme, so 
 
 | Path | What it is |
 |------|------------|
-| `hugo.toml` | Site config: `baseURL` (must stay `https://cartergriffin.github.io/blog/` for a project page), title, description, nav menu, permalink format, highlighting. `titleCaseStyle = "none"` stops Hugo title-casing tag names. |
+| `hugo.toml` | Site config: `baseURL` (must match the custom domain, `https://blog.grifflab.org/`), title, description, nav menu, permalink format, highlighting. `titleCaseStyle = "none"` stops Hugo title-casing tag names. |
 | `content/posts/` | One Markdown file per post. |
 | `content/about.md` | About page. |
 | `layouts/baseof.html` | Page shell: `<head>` (description, canonical URL, Open Graph and Twitter cards for LinkedIn previews, RSS link, CSS), header nav, footer. |
@@ -38,7 +39,7 @@ The site uses its own small set of templates instead of a third-party theme, so 
 
 ## URLs
 
-Posts live at `/blog/:year/:month/:day/:slug/`, the same shape the old Jekyll site used, so links already shared keep working. `slug` comes from each post's front matter. Other URLs: `/blog/posts/`, `/blog/tags/<tag>/`, `/blog/about/`, and the RSS feed at `/blog/index.xml`.
+Posts live at `/:year/:month/:day/:slug/` on `blog.grifflab.org`, the same shape as before the domain move, so the github.io redirect lands on the right page. `slug` comes from each post's front matter. Other URLs: `/posts/`, `/tags/<tag>/`, `/about/`, and the RSS feed at `/index.xml`.
 
 ## Writing a post
 

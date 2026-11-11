@@ -1,4 +1,4 @@
-baseURL = "https://cartergriffin.github.io/blog/"
+baseURL = "https://blog.grifflab.org/"
 locale = "en-us"
 title = "Carter Griffin"
 enableRobotsTXT = true
