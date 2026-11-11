@@ -3,16 +3,16 @@ title: "Searching every GPO by the path GPMC shows you (and the DLL hunt it took
 date: 2026-11-11T09:00:00-07:00
 slug: searching-every-gpo-by-gpmc-path
 tags: [group-policy, powershell, active-directory, reverse-engineering, security]
-description: "A PowerShell module that indexes every setting in every GPO in a domain and lets you search by setting name, value, or the exact GPMC path a hardening guide tells you to go to. Plus the reverse engineering it took to rebuild those paths."
+description: "I wanted to search all our GPOs by the same Computer Configuration > ... paths that hardening guides use. Those paths aren't in the GPO XML anywhere, so I went digging for the thing in Windows that builds them."
 ---
 
-Every hardening guide, CIS benchmark, vendor KB and pentest report tells you to change a GPO the same way:
+Pretty much every hardening guide, CIS benchmark, vendor KB and pentest report tells you to change a GPO the same way:
 
 > Go to **Computer Configuration > Policies > Windows Settings > Security Settings > Account Policies > Kerberos Policy** and set **Maximum lifetime for service ticket** to 600 minutes.
 
-So you have 800 GPOs. Which of them set that, and to what?
+Cool. So I have 800 GPOs, which ones set that and what are they set to?
 
-GPMC can't answer that. You click through GPOs one at a time. `Get-GPOReport -ReportType Xml` gets you the data, but this is what that setting looks like in it:
+GPMC won't tell you, you just click through GPOs one at a time until you find it or give up. `Get-GPOReport -ReportType Xml` does get you the data, but here's what that exact setting looks like in the XML:
 
 ```xml
 <q1:Account>
@@ -22,14 +22,9 @@ GPMC can't answer that. You click through GPOs one at a time. `Get-GPOReport -Re
 </q1:Account>
 ```
 
-It has no "Maximum lifetime for service ticket", no "minutes", and no "Account Policies > Kerberos Policy". The words in the guide, which are also the words you see in GPMC, **are not in the XML at all**. You can grep it all day and never find what the guide is talking about.
+There's no "Maximum lifetime for service ticket" in there, no "minutes", and definitely no "Account Policies > Kerberos Policy". The words the guide uses (which are also the words you see in GPMC) **just aren't in the XML**. You can grep it all day and you won't find what the guide is talking about.
 
-I built a module that fixes this. It indexes every setting in every GPO in a domain snapshot and lets you search by:
-
-- the setting name, as GPMC shows it,
-- the value, raw or as GPMC displays it,
-- the GPO name,
-- **or the GPMC path itself**, so `"Security Options > Domain Controller"` or `"Public Key Policies"` returns everything under that node in every GPO.
+So I built a module that fixes that. It indexes every setting in every GPO from a snapshot of the domain, and you can search it by the setting name the way GPMC shows it, by the value (raw or the way GPMC displays it), by GPO name, or by the GPMC path itself. That last one is the part I actually cared about, searching `"Security Options > Domain Controller"` or `"Public Key Policies"` gives you everything under that node across every GPO.
 
 ```text
 PS> Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Maximum lifetime for service ticket' |
@@ -41,13 +36,13 @@ GpmcPath   : Policies > Windows Settings > Security Settings > Account Policies/
 GpmcFields : {@{Name=Policy; Value=Maximum lifetime for service ticket}, @{Name=Setting; Value=600 minutes}}
 ```
 
-*(All output in this post is mocked up from a lab-style domain. None of it comes from a real environment.)*
+*(All the output in this post is mocked up from a lab-style domain, none of it is from a real environment.)*
 
-The code is at [github.com/cartergriffin/gpos](https://github.com/cartergriffin/gpos). The rest of this post covers how it works, because getting those paths meant finding the piece of Windows that builds them, and that took a while.
+Code is at [github.com/cartergriffin/gpos](https://github.com/cartergriffin/gpos). The rest of this post is how it works, and honestly the more interesting part is how long it took to find the piece of Windows that actually builds those paths.
 
-## Step 1: Snapshot everything once
+## Step 1, snapshot everything once
 
-Hitting AD every time you want to search is slow and rude, so the first step is a snapshot: `Get-GPO -All` for metadata, plus `Get-GPOReport -Guid <id> -ReportType Xml` for each GPO, all dumped into one JSON file.
+I didn't want to hit AD every time I searched for something, so step one is just taking a snapshot. `Get-GPO -All` for the metadata and `Get-GPOReport -Guid <id> -ReportType Xml` for every GPO, all dumped into one JSON file.
 
 ```powershell
 Import-Module .\gpos.psd1
@@ -55,47 +50,43 @@ Get-MassiveGPOReportSnapshot -outPath C:\temp\gpo
 # -> C:\temp\gpo\all_gpos-2026_11_11__09_00_00.json
 ```
 
-Everything after this runs offline against that file. Keep the old snapshots, because you'll want them later.
+Everything after this runs offline against that file. I'd keep the old snapshots around too, they come in handy later.
 
-## Step 2: Stop writing a handler per setting type
+## Step 2, stop writing a handler for every setting type
 
-The first version of this tool was `Find-GPOSetting`: a big `if`/`elseif` chain that knew where strings live in each kind of setting. Registry policies keep them here, firewall rules there, and so on. Every time I searched for something and got nothing back, I found another setting type it didn't handle and added a branch.
+The first version of this was `Find-GPOSetting`, which was a big `if`/`elseif` chain that knew where the strings lived for each kind of setting. Registry policies keep them in one spot, firewall rules in another, etc. Every time I searched for something and got nothing back I'd find some other setting type it didn't handle, and add another branch for it.
 
-The report XML has around 30 extension types in a typical domain: Registry, Security, Public Key, Firewall, Scripts, Printers, Drive Maps, Scheduled Tasks, Audit, Software Restriction, AppLocker, and a long tail of Preferences types that show up in one GPO each. Writing a handler per type means you're always one new type behind.
+In a typical domain the report XML has around 30 extension types. Registry, Security, Public Key, Firewall, Scripts, Printers, Drive Maps, Scheduled Tasks, Audit, Software Restriction, AppLocker, and then a long tail of Preferences types that only show up in like one GPO each. If you write a handler per type you're basically always going to be missing whatever got configured last week.
 
-The version that works has no per-type code:
+The version that actually works doesn't have any per-type code at all. It scans the whole snapshot once and, for each extension type, figures out which element paths repeat under a single parent. Those are things like certificates, rules, policies, drive maps, and I call each of those repeating records an "item". If some GPO has only one certificate it still gets split out as an item, because some other GPO had two and that's how it learned the shape. Then each item gets flattened into name/value pairs. Element paths become the names, attributes become `Path@name`, and repeated siblings get `[0]`, `[1]` and so on. Anything left over in an extension gets lumped into one `(extension)` item so nothing gets dropped. The search string gets matched (case-insensitive, literal) against the extension type, the item path, and every pair name and value.
 
-1. **Learn the item shapes from the data.** Scan the whole snapshot once. For each extension type, find the element paths that repeat under one parent: certificates, rules, policies, drive maps. Those repeating records are "items". A GPO that has only one certificate still gets it split out, because some other GPO had two.
-2. **Flatten each item into name/value pairs.** Element paths become names, attributes become `Path@name`, and repeated siblings get `[0]`, `[1]`. Whatever is left over in an extension becomes a single `(extension)` item, so nothing is dropped.
-3. **Match the search string against everything.** That covers the extension type, the item path, every pair name and every pair value. It's case-insensitive and literal.
+A setting type that didn't exist when I wrote the code gets indexed the same as everything else. The item shapes get cached next to the snapshot so this pass only runs once.
 
-A setting type that didn't exist when I wrote the code gets indexed the same way as the rest. The item shapes are cached next to the snapshot, so this pass runs once.
+That got me "find any string in any GPO", which was nice, but still no path. And the path was the whole reason I started this.
 
-That got me "find any string in any GPO". It didn't get me the path, and the path was the part I actually wanted.
+## Step 3, so where does "Public Key Policies" come from
 
-## Step 3: Where does "Public Key Policies" come from?
+GPMC's HTML report (`Get-GPOReport -ReportType Html`) shows the full tree, so *something* is turning the XML into "Security Settings > Public Key Policies/Trusted Root Certification Authorities". I could either hand-write a mapping table (I tried, for about an hour, and it was subtly wrong pretty much right away) or go find whatever Windows uses and call it myself.
 
-GPMC's HTML report (`Get-GPOReport -ReportType Html`) shows the full tree, so something turns XML into "Security Settings > Public Key Policies/Trusted Root Certification Authorities". My options were to hand-write a mapping table (I tried, briefly, and it was wrong in subtle ways almost immediately) or to find whatever Windows uses and call it.
+So I went looking. I'm including all the wrong turns here because that's where most of the useful tricks ended up being.
 
-I went looking. Here's how that went, wrong turns included, because the wrong turns are where the useful techniques are.
+### Theory 1, it's an XSL stylesheet
 
-### Theory 1: it's an XSL stylesheet
+XML goes in and an HTML report comes out. Surely that's XSLT, right?
 
-An XML document becomes an HTML report. That has to be XSLT, right?
+I wrote a quick scanner, `Find-BinaryString`, that reads files in `System32` and `System32\en-US` and searches the raw bytes for `<xsl:stylesheet`, `xsl:template` and the heading text, in both ASCII and UTF-16LE. The UTF-16 part is important because Windows stores most of its strings that way, and plain `Select-String` will skip right past them.
 
-I wrote a quick scanner, `Find-BinaryString`, that reads files in `System32` and `System32\en-US` and searches the raw bytes for `<xsl:stylesheet`, `xsl:template` and the heading text, in both ASCII and UTF-16LE. The UTF-16 part matters, because Windows stores most of its strings that way and a plain `Select-String` skips right past them.
-
-Scanning blindly for a stylesheet I wasn't sure existed seemed premature, though. First I wanted to know which binary actually produces the report, so I went to look at the code.
+I didn't want to just blindly scan for a stylesheet I wasn't even sure existed though. I wanted to know which binary actually produces the report first, so I went and looked at the code.
 
 ### Following the cmdlet down
 
-`Get-GPOReport` lives in the GroupPolicy module, which is managed code, so ILSpy can open it. One gotcha first: in PowerShell 7 the module loads through the Windows PowerShell compatibility layer, so `(Get-Command Get-GPOReport).DLL` returns nothing because you're holding a proxy function. Ask Windows PowerShell 5.1 instead, which also tells you where the next layer lives:
+`Get-GPOReport` lives in the GroupPolicy module, which is managed code, so ILSpy can open it. Small gotcha first. In PowerShell 7 the module loads through the Windows PowerShell compatibility layer, so `(Get-Command Get-GPOReport).DLL` gives you nothing because what you're holding is a proxy function. Ask Windows PowerShell 5.1 instead, and it'll also tell you where the next layer lives:
 
 ```powershell
 powershell.exe -NoProfile -Command 'Import-Module GroupPolicy; $a = [Microsoft.GroupPolicy.Gpo].Assembly; $a.Location; $a.GetReferencedAssemblies().Name'
 ```
 
-The cmdlet is thin. It gets a `Gpo` object and calls `GenerateReport`, and that's it. `Gpo` lives in `Microsoft.GroupPolicy.Management.dll` in the GAC, and here is the whole method:
+The cmdlet is really thin. It gets a `Gpo` object, calls `GenerateReport` on it, and that's about it. `Gpo` lives in `Microsoft.GroupPolicy.Management.dll` in the GAC, and this is the entire method.
 
 ```csharp
 public string GenerateReport(ReportType reportType, out GPStatusMessageCollection statusMessages)
@@ -109,13 +100,13 @@ public string GenerateReport(ReportType reportType, out GPStatusMessageCollectio
 }
 ```
 
-It's a pass-through to `_GPMGPO`, a COM interop type whose `GenerateReport` is `[MethodImpl(InternalCall)]` with no body. So the report comes from the GPMC COM server, which is the native `C:\Windows\System32\gpmgmt.dll`. ILSpy correctly refuses to open that.
+It just passes through to `_GPMGPO`, which is a COM interop type, and its `GenerateReport` is `[MethodImpl(InternalCall)]` with no body. So the report comes out of the GPMC COM server, which is native code in `C:\Windows\System32\gpmgmt.dll`, and ILSpy (correctly) won't open it.
 
 ### Taking gpmgmt.dll apart
 
-7-Zip opens PE files as archives (right-click, 7-Zip, Open archive), which gives you every section and resource as a file. `gpmgmt.dll` has very few resources: type library data, some COM registration scripts, version info, and an unnamed resource type `169` with two small items. `Format-Hex` showed both were XML. Exciting for about four seconds, until they turned out to be the backup schemas `Backup-GPO` uses. Running the scanner over the extracted `.rdata`, `.text` and `.data` sections found no stylesheet and no "Public Key Policies".
+Fun fact, 7-Zip will open PE files as archives (right-click, 7-Zip, Open archive), and you get every section and resource as its own file. `gpmgmt.dll` doesn't have a lot of resources. There's type library data, some COM registration scripts, version info, and an unnamed resource type `169` with two small items in it. `Format-Hex` showed both of those were XML, which was exciting for about four seconds until they turned out to be the backup schemas that `Backup-GPO` uses. I ran the scanner over the extracted `.rdata`, `.text` and `.data` sections and found no stylesheet and no "Public Key Policies".
 
-`.rdata` was still useful, though. Dumping its strings turned up debug and log messages that describe what the code does:
+`.rdata` was still worth it though. Dumping its strings turned up a bunch of debug/log messages that pretty much describe what the code does:
 
 ```text
 CGPMReport::GenerateReportFromTemplate : GenerateReport failed with 0x%x
@@ -125,33 +116,33 @@ GenerateFromGPO / GenerateFromBackup / GenerateFromRSOP
 ConvertToXml / ConvertToHtml
 ```
 
-So `gpmgmt.dll` doesn't build the report either. It `CoCreateInstance`s a **ReportFactory**, hands it the GPO, and asks it to convert to XML or HTML. Great: what is ReportFactory, and where does it live?
+So `gpmgmt.dll` doesn't build the report either! It `CoCreateInstance`s something called a **ReportFactory**, hands it the GPO, and asks it to convert to XML or HTML. Great, so what is ReportFactory and where does it live?
 
-### A series of confident dead ends
+### A bunch of confident dead ends
 
-This is the part that took about an hour:
+This is the part that took about an hour.
 
-- **Registry search for a COM class named "report":** nothing relevant. The CLSID is hard-coded and has no friendly name.
-- **Diffing loaded modules before and after `Get-GPOReport`:** the new modules were `gpmgmt.dll` and its static imports, `GPRSoP.DLL` and `SCECLI.dll` among them. I dumped every string from both. `GPRSoP` is the RSoP wizard UI and `scecli` is the Security Settings client-side extension. Neither one builds reports.
-- **Scanning all of System32 for "Public Key Policies":** hits in `certmgr.dll` (the Certificates snap-in), `manage-bde.exe.mui`, and `gpresult.exe.mui`. That last one looked like the answer for a while, since gpresult produces the same kind of report. It wasn't. The hit was `gpresult /?` help text.
+I searched the registry for a COM class with "report" in the name and got nothing useful, since the CLSID is hard-coded and has no friendly name. Then I diffed the loaded modules before and after running `Get-GPOReport`. The new ones were `gpmgmt.dll` and its static imports, including `GPRSoP.DLL` and `SCECLI.dll`, so I dumped every string out of both. Turns out `GPRSoP` is the RSoP wizard UI and `scecli` is the Security Settings client-side extension, and neither of them builds reports.
 
-Every one of these came back empty, which mostly told me what the factory wasn't.
+After that I scanned all of System32 for "Public Key Policies". Hits came back in `certmgr.dll` (the Certificates snap-in), `manage-bde.exe.mui`, and `gpresult.exe.mui`. I was pretty sure gpresult was the answer for a while since it produces the same kind of report. It wasn't, the hit was the `gpresult /?` help text lol.
 
-### The check I should have run first
+All of that came back empty. About the only thing I learned was where the factory *wasn't*.
 
-Before digging further, I confirmed the HTML report contains the headings at all, and looked at how they're marked up:
+### The check I should have done first
+
+Before going any deeper I finally checked that the HTML report even had the headings in it, and how they were marked up:
 
 ```html
 <div class="he3"><span class="sectionTitle" tabindex="0">Public Key Policies
 ```
 
-That gave me two things. The nesting is in the `heN` class names, and `sectionTitle` is a string that has to exist wherever the HTML is generated. Scanning for `sectionTitle` plus the XSL namespace URI (`w3.org/1999/XSL/Transform`, which every stylesheet has to declare whatever prefix it uses) found exactly one Group Policy file: `en-US\gppref.dll.mui`, with three stylesheets inside it.
+That actually told me a lot. The nesting is encoded in the `heN` class names, and `sectionTitle` is a string that has to exist somewhere in whatever generates the HTML. So I scanned for `sectionTitle` plus the XSL namespace URI (`w3.org/1999/XSL/Transform`, since every stylesheet has to declare it no matter what prefix it uses). That found exactly one Group Policy file, `en-US\gppref.dll.mui`, with three stylesheets inside.
 
-So Theory 1 was right, but only for Group Policy Preferences. Preferences items render through XSL, and those stylesheets are clean, readable rules. Nothing else does. Security Settings, Administrative Templates and Public Key Policies weren't covered.
+So Theory 1 was right after all... but only for Group Policy Preferences. Preferences items get rendered through XSL, and those stylesheets are nice readable rules. Nothing else uses them though. Security Settings, Administrative Templates and Public Key Policies were still unaccounted for.
 
 ### The second type library
 
-At this point the plan was to disassemble `gpmgmt.dll`, which meant getting a copy onto a machine with real analysis tools. You don't have to copy a binary off a work machine for that. Microsoft's public symbol server serves released binaries, keyed by the PE header's timestamp and image size:
+At this point the plan was to disassemble `gpmgmt.dll`, which meant getting a copy onto a machine with real analysis tools. You don't actually have to copy a binary off a work machine to do that. Microsoft's public symbol server serves the released binaries too, keyed by the timestamp and image size from the PE header:
 
 ```powershell
 # On the machine that has the DLL: print the symbol server key (TimeDateStamp + SizeOfImage)
@@ -163,9 +154,9 @@ $pe = [BitConverter]::ToInt32($b, 0x3C)
 # https://msdl.microsoft.com/download/symbols/gpmgmt.dll/<that key>/gpmgmt.dll
 ```
 
-Mine came down as a file called `blob`. It's the DLL, so rename it and check the signature with `Get-AuthenticodeSignature`.
+Mine downloaded as a file called `blob`. It's the DLL, just rename it and check the signature with `Get-AuthenticodeSignature`.
 
-It never needed disassembling. Earlier I'd only read strings out of `TYPELIB\1`, which describes the public GPMC COM API everyone knows. The DLL has a second one. **`TYPELIB\2` declares the report factory**, and it isn't native:
+Didn't end up needing to disassemble anything. Earlier I'd only pulled strings out of `TYPELIB\1`, which describes the public GPMC COM API that everyone already knows about. But the DLL has a second one, and **`TYPELIB\2` declares the report factory**. And it isn't native!
 
 ```text
 Class:    Microsoft.GroupPolicy.Reporting.ReportFactory
@@ -174,24 +165,21 @@ IReportFactory: GenerateFromGPO, GenerateFromBackup, GenerateFromRSOP,
                 ConvertToXml, ConvertToHtml, InitializeAdm, IncludeComments, ...
 ```
 
-The report engine is a **.NET assembly**, loaded through COM interop. That's why none of the native string scans found it: it isn't in System32. It's here:
+The report engine is a **.NET assembly** that gets loaded through COM interop. That's why none of my native string scans ever found it, it's not in System32 at all. It lives in the GAC.
 
 ```text
 C:\Windows\Microsoft.NET\assembly\GAC_MSIL\Microsoft.GroupPolicy.Reporting\v4.0_2.0.0.0__31bf3856ad364e35\Microsoft.GroupPolicy.Reporting.dll
 ```
 
-It's about 2.4 MB, with a 540 KB satellite resources assembly holding the English strings. ILSpy opens all of it.
+About 2.4 MB, plus a 540 KB satellite resources assembly with the English strings in it. And ILSpy opens all of it.
 
-## Step 4: Read the engine, then borrow it
+## Step 4, read the engine and then borrow it
 
-Decompiled, the whole thing is plain C#:
+Decompiled, the whole thing is just plain C#. `ConvertToHtml` builds the page out of C# template classes (`Microsoft.GroupPolicy.Reporting.Html.Gpo.GpoReportTemplate`, plus a renderer per section), so outside of Preferences there's no XSL anywhere. The display text comes out of the resource table. For example `AccountPolicyRenderer` maps `MaxServiceAge` to "Maximum lifetime for service ticket" with a value format of `{0} minutes`, and every section type has something like that. The XML report turned out to be the same C# object graph run through `XmlSerializer`, which is where those weird `xsi:type="q1:SecuritySettings"` names come from, and why the `q1`/`q2`/`q7` prefixes change from document to document.
 
-- `ConvertToHtml` builds the page from C# template classes (`Microsoft.GroupPolicy.Reporting.Html.Gpo.GpoReportTemplate` and one renderer per section). There's no XSL outside Preferences.
-- Display text comes from the resource table. For example, `AccountPolicyRenderer` maps `MaxServiceAge` to "Maximum lifetime for service ticket" with a value format of `{0} minutes`. Every section type has an equivalent.
-- The XML report is the same C# object graph run through `XmlSerializer`. That's where the odd `xsi:type="q1:SecuritySettings"` names come from, and why the `q1`/`q2`/`q7` prefixes change from document to document.
-- **`GenerateFromBackup(path)` reads a report XML file from disk, deserializes it, and gives you an object you can call `ConvertToHtml()` on.** It never talks to the domain.
+The part that really mattered was `GenerateFromBackup(path)`. It reads a report XML file off disk, deserializes it, and gives you back an object you can call `ConvertToHtml()` on, without ever talking to the domain.
 
-That last point was the one that mattered. The snapshot already holds report XML for every GPO, so the actual GPMC engine can render GPMC's actual HTML for any of it, offline:
+My snapshot already has the report XML for every GPO, so I can get the actual GPMC engine to render the actual GPMC HTML for any of it, offline:
 
 ```powershell
 Add-Type -Path 'C:\Windows\Microsoft.NET\assembly\GAC_MSIL\Microsoft.GroupPolicy.Reporting\v4.0_2.0.0.0__31bf3856ad364e35\Microsoft.GroupPolicy.Reporting.dll'
@@ -202,17 +190,11 @@ $html = [Microsoft.GroupPolicy.Reporting.ReportFactory]::new().GenerateFromBacku
 
 ### Turning a render into a path
 
-Rendering a whole GPO gives you a tree of headings with tables underneath, but which row belongs to which XML item? You could try matching values between the two, but that's fuzzy, and nothing about this problem should be fuzzy.
+If you render a whole GPO you get a tree of headings with tables under them, but you still don't know which row belongs to which XML item. You could try matching values between the two, but that gets fuzzy fast and I really didn't want anything fuzzy in this.
 
-The trick is to give the engine nothing else to render. For each item:
+What I ended up doing is just giving the engine nothing else to render. For each item I build a copy of the GPO's XML that contains only that one item, render it, and read the chain of `sectionTitle` headings out. Since there's only one thing in the report, that chain *is* the item's GPMC path, and the table rows under it are the exact name/value text GPMC shows. No mapping table, no heuristics, it's deterministic. Identical items get hashed and only rendered once (a root CA pushed by 50 GPOs costs one render), and the results get cached next to the snapshot so only the first run is slow.
 
-1. Build a copy of the GPO's XML that contains **only that one item**.
-2. Render it.
-3. Read the chain of `sectionTitle` headings. With only one thing in the report, that chain *is* the item's GPMC path, and the table rows under it are the exact name/value text GPMC shows.
-
-No mapping table and no heuristics, so the result is deterministic. Identical items are hashed and rendered once (a root CA pushed by 50 GPOs costs one render), and results are cached next to the snapshot, so only the first run is slow.
-
-The text from the render goes on each result as `GpmcFields`, which is also what makes raw values readable. `SettingNumber = 1` on `LDAPServerIntegrity` is meaningless until the engine says it means **None**:
+The text from the render goes on each result as `GpmcFields`, and that's also how raw values become readable. `SettingNumber = 1` on `LDAPServerIntegrity` doesn't mean anything to me until the engine says it means **None**:
 
 ```text
 PS> $r = Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'LDAP server signing requirements'
@@ -224,38 +206,43 @@ SettingNumber : 1
 GpmcFields    : {@{Name=Policy; Value=Domain controller: LDAP server signing requirements}, @{Name=Setting; Value=None}}
 ```
 
-### Things that broke along the way
+### Stuff that broke along the way
 
-A few failures had more interesting causes than the bugs themselves, so here they are:
+Some of the failures were more interesting than the actual fixes, so here they are.
 
-- **Some templates expect siblings.** The wireless (WLan) renderer dereferences both the profile list and the network filter, so a one-item render throws a null reference. The fix: when a single-item render fails, render the whole extension and use the heading chain all of its rows share. Those results are marked `OkExtensionLevel`, so you can tell them apart.
-- **Audit policy needed MMC.** Every `AuditSettings` render failed with `Could not load file or assembly 'Microsoft.ManagementConsole, Version=3.0.0.0'`. The assembly was there, but in the *legacy* GAC (`C:\Windows\assembly`), which the .NET 4 runtime doesn't search. GPMC finds it and PowerShell doesn't. An `AssemblyResolve` handler that looks in the old GAC by name, version and public key token fixed every Audit item at once.
-- **GPMC hides disabled preference items.** `PolicyMakerSettingsTemplate` skips any item where `IsDisabled()` is true, so they render to nothing. They're still in the GPO, and you still want to find them. The fix is to flip `disabled="1"` to `0` on the throwaway copy, render it, and mark the result `OkDisabled`.
-- **Some things really aren't shown.** Leftover `(extension)` fields and registry entries with no value (key-only deletes, for example) come back `NotRendered`. Nothing is silently dropped. Every item gets a status, so gaps are visible.
-- **Runtime matters.** `Microsoft.GroupPolicy.Reporting` is .NET Framework code. It mostly works when loaded into PowerShell 7 on modern .NET, but "mostly" isn't good enough for a tool you trust, so the repo has `tests/Compare-GPORuntimes.ps1`. It runs the same snapshot under both shells with separate caches and diffs every path and status. Windows PowerShell 5.1 is the reference, since it's the runtime GPMC itself uses.
-- **PowerShell was the slow part.** Splitting, flattening and matching per item in PowerShell took about 9 seconds per search, and loading plus parsing the snapshot was only half a second of that. Moving the indexing into C# (`private/GpoSnapshotIndex.cs`, compiled with `Add-Type` when the module loads) made it fast enough to use interactively.
+Some templates expect siblings. The wireless (WLan) renderer dereferences both the profile list and the network filter, so rendering one item by itself throws a null reference. When a single-item render fails I now render the whole extension and use the heading chain all of its rows share. Those results get marked `OkExtensionLevel` so you can tell them apart.
 
-## What you can do with it
+Audit policy needed MMC, which I didn't see coming. Every `AuditSettings` render failed with `Could not load file or assembly 'Microsoft.ManagementConsole, Version=3.0.0.0'`. The assembly was on the box, but it was in the *legacy* GAC (`C:\Windows\assembly`), which the .NET 4 runtime doesn't look in. GPMC finds it fine, PowerShell doesn't. An `AssemblyResolve` handler that looks in the old GAC by name, version and public key token fixed every Audit item in one go.
 
-Once every setting in the domain has a GPMC path, a name, a raw value and a display value, a lot of questions become one-liners. There's something here for everyone.
+GPMC hides disabled preference items. `PolicyMakerSettingsTemplate` skips anything where `IsDisabled()` is true, so those render to nothing. They're still in the GPO and you still want to be able to find them, so I flip `disabled="1"` to `0` on the throwaway copy, render it, and mark the result `OkDisabled`.
+
+Some things really just aren't shown. Leftover `(extension)` fields and registry entries with no value (key-only deletes, for example) come back as `NotRendered`. Every item gets a status, so nothing silently disappears and you can see the gaps.
+
+The runtime matters too. `Microsoft.GroupPolicy.Reporting` is .NET Framework code. It mostly works loaded into PowerShell 7 on modern .NET, but I didn't want to trust "mostly", so the repo has `tests/Compare-GPORuntimes.ps1`. It runs the same snapshot under both shells with separate caches and diffs every path and status. I treat Windows PowerShell 5.1 as the reference since that's the runtime GPMC itself uses.
+
+And PowerShell was the slow part. Doing the splitting, flattening and matching per item in PowerShell took about 9 seconds per search, and loading plus parsing the snapshot was only half a second of that. Moving the indexing into C# (`private/GpoSnapshotIndex.cs`, compiled with `Add-Type` when the module loads) made it fast enough to actually use interactively.
+
+## Stuff you can do with it
+
+Once every setting in the domain has a GPMC path, a name, a raw value and a display value, a lot of annoying questions turn into one-liners. I tried to get something in here for sysadmins, blue team and red team.
 
 ### Sysadmins
 
-**"Where is that old server still referenced?"** UNC paths hide in scripts, drive maps, printers, shortcuts, file copies and folder redirection. One search covers all of them:
+The one I use most is finding where some old server is still referenced. UNC paths end up hiding in scripts, drive maps, printers, shortcuts, file copies and folder redirection, and one search covers all of them:
 
 ```powershell
 Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'oldfs01' |
     Select-Object GPOName, Scope, GpmcPath, Item
 ```
 
-**"Which GPOs touch Scripts, and what do they run?"**
+Same idea for startup scripts, this gets you every GPO that has them and what they run.
 
 ```powershell
 Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Windows Settings > Scripts > Startup' |
     Select-Object GPOName, Scope, GpmcPath, GpmcFields
 ```
 
-**"Which GPOs are the big ones?"**
+And if you've ever wondered which GPOs are the big ones.
 
 ```powershell
 Search-AllGPOSettingsDynamic -JsonPath $jp |
@@ -264,18 +251,18 @@ Search-AllGPOSettingsDynamic -JsonPath $jp |
     Select-Object -First 20 Count, Name
 ```
 
-**Overlap.** Group results by `GpmcPath` and `Item` across GPOs, and any group with more than one distinct value is two GPOs disagreeing about the same setting. That's the classic "it works in that OU but not this one" ticket.
+Overlap is the other big one. If you group results by `GpmcPath` and `Item` across GPOs, any group with more than one distinct value is two GPOs disagreeing about the same setting. That's basically every "it works in that OU but not this one" ticket I've ever gotten.
 
 ### Blue team
 
-**Check a baseline the way it's written.** Paste the path from the CIS doc and see who sets it and to what:
+You can check a baseline the way it's actually written. Paste the path straight out of the CIS doc and see who sets it and to what:
 
 ```powershell
 Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Security Options > Domain Controller' |
     Select-Object GPOName, Item, @{ n = 'Value'; e = { ($_.GpmcFields | Where-Object Name -eq 'Setting').Value } }
 ```
 
-**Find "allow everything" values.** For example, ADMX edit boxes set to `*`:
+Finding "allow everything" values is another good one, like ADMX edit boxes that someone set to `*`:
 
 ```text
 PS> Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Allow unsolicited incoming messages' |
@@ -287,20 +274,20 @@ GPOName              GpmcPath                                                   
 Lab Workstation Base Policies > Administrative Templates > Network/Network Connections/Windows... Enabled        *
 ```
 
-**Broad principals in sensitive places.** Search for `Everyone` or `Authenticated Users` and filter `GpmcPath` to `User Rights Assignment`, `Restricted Groups`, or file system and registry ACLs.
+For broad principals in sensitive places, search for `Everyone` or `Authenticated Users` and filter `GpmcPath` down to `User Rights Assignment`, `Restricted Groups`, or the file system and registry ACLs.
 
-**Certificates.** Every cert pushed by Public Key Policies comes back as an item. The blob is a serialized certificate-store element rather than a bare DER cert, and property 32 inside it is the certificate. Decode it and sort by `NotAfter` to find expired roots that are still being deployed, and intermediates nobody remembers adding.
+Certificates are in there too. Every cert pushed through Public Key Policies comes back as an item. The blob is a serialized certificate store element and not a bare DER cert, and property 32 inside it is the actual certificate. Decode that and sort by `NotAfter` and you'll find expired roots that are still getting deployed, and probably a couple intermediates nobody remembers adding.
 
 ### Red team
 
-**Group Policy Preferences passwords.** MS14-025 removed the ability to *set* them years ago, but it didn't clean up the ones already there. The `cpassword` attribute is an indexed pair name like any other:
+Group Policy Preferences passwords are still a thing. MS14-025 took away the ability to *set* them years ago but it never cleaned up the ones that were already there. `cpassword` is just an attribute, so it gets indexed as a pair name like anything else:
 
 ```powershell
 Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'cpassword' |
     Select-Object GPOName, Extension, ItemPath, Item
 ```
 
-**Writable things that run as SYSTEM.** Startup scripts, scheduled tasks and software installs point at files on shares. If a non-admin can write to one of those files, that's code execution on every machine the GPO applies to. Pull every executed path out of the index and check its ACL:
+The other one is writable stuff that runs as SYSTEM. Startup scripts, scheduled tasks and software installs point at files on shares, and if a non-admin can write to one of those files that's code execution on every machine the GPO applies to. Pull every executed path out of the index and check the ACLs:
 
 ```powershell
 $exec = Search-AllGPOSettingsDynamic -JsonPath $jp |
@@ -317,13 +304,13 @@ foreach ($p in $exec) {
 }
 ```
 
-Check the parent folders too: if you can replace a file, you can usually also create one next to it. The snapshot only needs read access to GPOs, which any domain user has by default, so blue teams should run this before someone else does.
+Check the parent folders too, because if you can replace a file you can usually create one next to it. Taking the snapshot only needs read access to GPOs, which any domain user has by default, so blue teams should probably run this before somebody else does.
 
-## How this compares to GPOZaurr
+## Compared to GPOZaurr
 
-[GPOZaurr](https://github.com/EvotecIT/GPOZaurr) is great, and you should run it. It's built for GPO *hygiene*: duplicate (CNF) objects, broken and disabled links, empty GPOs, ownership and permission problems, AD vs. SYSVOL consistency. It answers "is my Group Policy infrastructure healthy?"
+[GPOZaurr](https://github.com/EvotecIT/GPOZaurr) is great and you should run it. It's built for GPO hygiene stuff like duplicate (CNF) objects, broken and disabled links, empty GPOs, ownership and permission problems, and AD vs SYSVOL consistency. Basically it tells you whether your Group Policy infrastructure is healthy.
 
-This tool answers a different question: "what does each GPO actually configure, in the words GPMC uses, and where else is the same thing configured?" It searches and compares at the setting level, which as far as I can tell GPOZaurr doesn't do. They complement each other well.
+This is answering a different question, which is what each GPO actually configures (in the words GPMC uses) and where else that same thing is configured. It searches and compares at the setting level, and as far as I can tell GPOZaurr doesn't do that. I'd run both.
 
 ## Try it
 
@@ -336,15 +323,10 @@ $jp = (Get-ChildItem C:\temp\gpo\all_gpos-*.json | Sort-Object LastWriteTime | S
 Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Public Key Policies'
 ```
 
-Requirements: a Windows machine with GPMC / RSAT Group Policy tools, which is what puts `Microsoft.GroupPolicy.Reporting` in the GAC. Windows PowerShell 5.1 is the safest runtime for the path mapping. The first search renders and caches every item, so it takes a while. After that, searches use the cache. `-NoGpmcPath` skips path mapping if you just want the raw string search.
+You'll need a Windows machine with GPMC / RSAT Group Policy tools installed, since that's what puts `Microsoft.GroupPolicy.Reporting` in the GAC. Windows PowerShell 5.1 is the safest runtime for the path mapping. The first search renders and caches every item so it takes a while, after that it's all cached. `-NoGpmcPath` skips the path mapping if all you want is the raw string search.
 
-## Takeaways
+## Stuff I'd tell myself before starting
 
-- **If an XML file doesn't contain the text, something else adds it.** Find that thing and call it, rather than rebuilding its rules by hand.
-- **Scan binaries in UTF-16LE too.** Most Windows strings are stored that way.
-- **7-Zip opens PE files**, and log strings in `.rdata` describe the code better than most docs.
-- **"Native COM server" doesn't mean native all the way down.** Read every type library in the binary, not just the first one.
-- **Microsoft's symbol server hands out binaries too.** You don't need to copy files off a box you shouldn't copy files off.
-- **Check the output before you dig into the internals.** One regex on the HTML (`sectionTitle`) found more than an hour of scanning DLLs did.
+If the text isn't in the XML then something else is adding it, and it's way less work to find that thing and call it than to rebuild its rules by hand. Scan binaries in UTF-16LE too, since that's how Windows stores most of its strings. 7-Zip opens PE files, and the log strings in `.rdata` describe the code better than most of the docs do. Just because something's a native COM server doesn't mean it's native all the way down, so read every type library in the binary and not just the first one. Microsoft's symbol server hands out binaries as well as symbols, which is handy when you're not supposed to be copying files off a box. And check the output before digging into the internals. One regex on the HTML (`sectionTitle`) found more than an hour of DLL scanning did.
 
-I did most of this with Claude as a pair. It was fast at writing scanners and reading decompiled code, and it was also confidently wrong about where the engine lived more than once. The breakthroughs came from refusing to accept "it's probably not possible" and running one more check. If you find a setting type that comes back `NotRendered` or `Error`, open an issue. That status exists so failures show up instead of disappearing.
+I did most of this with Claude as a pair. It was fast at writing scanners and reading decompiled code, and it was also confidently wrong about where the engine lived more than once. Most of the progress came from not accepting "it's probably not possible" and running one more check. If you find a setting type that comes back `NotRendered` or `Error`, open an issue, that status is there so failures show up instead of getting quietly dropped.
