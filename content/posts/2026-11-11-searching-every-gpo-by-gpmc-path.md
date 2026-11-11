@@ -10,7 +10,7 @@ Pretty much every hardening guide, CIS benchmark, vendor KB and pentest report t
 
 > Go to **Computer Configuration > Policies > Windows Settings > Security Settings > Account Policies > Kerberos Policy** and set **Maximum lifetime for service ticket** to 600 minutes.
 
-Cool. So I have 800 GPOs, which ones set that and what are they set to?
+Cool. So I have 2,000 GPOs, which ones set that and what are they set to?
 
 GPMC won't tell you, you just click through GPOs one at a time until you find it or give up. `Get-GPOReport -ReportType Xml` does get you the data, but here's what that exact setting looks like in the XML:
 
@@ -23,6 +23,8 @@ GPMC won't tell you, you just click through GPOs one at a time until you find it
 ```
 
 There's no "Maximum lifetime for service ticket" in there, no "minutes", and definitely no "Account Policies > Kerberos Policy". The words the guide uses (which are also the words you see in GPMC) **just aren't in the XML**. You can grep it all day and you won't find what the guide is talking about.
+
+And as far as I could find, nothing out there solves this. Every "search all your GPOs" script I came across (Microsoft's own SearchGPOsForSetting script included) text-searches the report XML, so it hits the exact same wall. GPMC's built-in search only matches setting names for some extension types and never values, and the commercial tools I found stick to Administrative Templates. Nothing I found rebuilds the actual GPMC paths, or gets them from the same engine GPMC uses.
 
 So I built a module that fixes that. It indexes every setting in every GPO from a snapshot of the domain, and you can search it by the setting name the way GPMC shows it, by the value (raw or the way GPMC displays it), by GPO name, or by the GPMC path itself. That last one is the part I actually cared about, searching `"Security Options > Domain Controller"` or `"Public Key Policies"` gives you everything under that node across every GPO.
 
@@ -38,7 +40,153 @@ GpmcFields : {@{Name=Policy; Value=Maximum lifetime for service ticket}, @{Name=
 
 *(All the output in this post is mocked up from a lab-style domain, none of it is from a real environment.)*
 
-Code is at [github.com/cartergriffin/gpos](https://github.com/cartergriffin/gpos). The rest of this post is how it works, and honestly the more interesting part is how long it took to find the piece of Windows that actually builds those paths.
+Code is at [github.com/cartergriffin/gpos](https://github.com/cartergriffin/gpos). I'm going to start with the stuff you can actually do with it, then get into how it works, which is honestly the more interesting part since it took forever to find the piece of Windows that actually builds those paths.
+
+## Stuff you can do with it
+
+Once every setting in the domain has a GPMC path, a name, a raw value and a display value, a lot of annoying questions turn into one-liners. I tried to get something in here for sysadmins, blue team and red team.
+
+Quick primer on what comes back so the queries make sense. Each result is one setting. `GpmcPath` is where it shows up in GPMC, `GpmcFields` is the name/value text GPMC displays for it, and `GpmcPathStatus` says whether the path came out clean (`Ok` most of the time, more on the others further down). Every raw field from the XML is on there too as its own property, like `SettingNumber` or `'EditText/Value'`.
+
+### Sysadmins
+
+Before making a new GPO, check whether something in the domain already does what you want. Say you need to push a trusted root cert out to everything. You google how to do it, the guide says it lives under Public Key Policies > Trusted Root Certification Authorities, and you search for that exact text:
+
+```powershell
+# the specific node, i.e. GPOs already pushing trusted roots
+Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Trusted Root Certification Authorities' |
+    Group-Object GPOName | Select-Object Count, Name
+
+# the broader node, catches GPOs pushing intermediates, enterprise trust, cert enrollment settings etc
+Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Public Key Policies' |
+    Select-Object GPOName, GpmcPath, Item
+```
+
+Now you know which GPO the new cert probably belongs in, so you don't end up with yet another one-setting GPO doing the same job. And even if you do make a new one, you've got a working example from your own domain right there instead of fumbling through the config from scratch. This works for pretty much anything a guide hands you a path for.
+
+The one I use most is finding where some old server is still referenced. UNC paths end up hiding in scripts, drive maps, printers, shortcuts, file copies and folder redirection, and one search covers all of them:
+
+```powershell
+Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'oldfs01' |
+    Select-Object GPOName, Scope, GpmcPath, Item
+```
+
+Same idea for startup scripts, this gets you every GPO that has them and what they run.
+
+```powershell
+Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Windows Settings > Scripts > Startup' |
+    Select-Object GPOName, Scope, GpmcPath, GpmcFields
+```
+
+This is how you find the scripts you were sure you'd removed from the domain, plus the logon script from 20 years ago that's still setting a registry value your shiny new policy is supposed to own. Swap `Startup` for `Shutdown`, `Logon` or `Logoff` to cover the rest. Anything a script writes on every boot is going to fight whatever the policy says, so it's worth checking any script that touches the same keys as your settings.
+
+And if you've ever wondered which GPOs are the big ones.
+
+```powershell
+Search-AllGPOSettingsDynamic -JsonPath $jp |
+    Where-Object GpmcPathStatus -in 'Ok', 'OkExtensionLevel' |
+    Group-Object GPOName | Sort-Object Count -Descending |
+    Select-Object -First 20 Count, Name
+```
+
+Overlap is the other big one. If you group results by `GpmcPath` and `Item` across GPOs, any group with more than one distinct value is two GPOs disagreeing about the same setting. That's basically every "it works in that OU but not this one" ticket I've ever gotten.
+
+### Blue team
+
+You can check a baseline the way it's actually written. Paste the path straight out of the CIS doc and see who sets it and to what:
+
+```powershell
+Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Security Options > Domain Controller' |
+    Select-Object GPOName, Item, @{ n = 'Value'; e = { ($_.GpmcFields | Where-Object Name -eq 'Setting').Value } }
+```
+
+Finding "allow everything" values is another good one, like ADMX edit boxes that someone set to `*`:
+
+```text
+PS> Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Allow unsolicited incoming messages' |
+>>     Where-Object { $_.'EditText/Value' -eq '*' } |
+>>     Select-Object GPOName, GpmcPath, 'EditText/State', 'EditText/Value'
+
+GPOName              GpmcPath                                                                   EditText/State EditText/Value
+-------              --------                                                                   -------------- --------------
+Lab Workstation Base Policies > Administrative Templates > Network/Network Connections/Windows... Enabled        *
+```
+
+For broad principals in sensitive places, search for `Everyone` or `Authenticated Users` and filter `GpmcPath` down to `User Rights Assignment`, `Restricted Groups`, or the file system and registry ACLs.
+
+Certificates are in there too. Every cert pushed through Public Key Policies comes back as an item. The blob is a serialized certificate store element and not a bare DER cert, and property 32 inside it is the actual certificate. Decode that and sort by `NotAfter` and you'll find expired roots that are still getting deployed, and probably a couple intermediates nobody remembers adding.
+
+### Red team
+
+Group Policy Preferences passwords are still a thing. MS14-025 took away the ability to *set* them years ago but it never cleaned up the ones that were already there. `cpassword` is just an attribute, so it gets indexed as a pair name like anything else:
+
+```powershell
+Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'cpassword' |
+    Select-Object GPOName, Extension, ItemPath, Item
+```
+
+The other one is writable stuff that runs as SYSTEM. Startup scripts, scheduled tasks and software installs point at files on shares, and if a non-admin can write to one of those files that's code execution on every machine the GPO applies to. Pull every executed path out of the index and check the ACLs:
+
+```powershell
+$exec = Search-AllGPOSettingsDynamic -JsonPath $jp |
+    Where-Object Extension -in 'Scripts', 'ScheduledTasksSettings', 'SoftwareInstallationSettings' |
+    ForEach-Object { $_.GpmcFields.Value } |
+    Select-String -Pattern '\\\\[^\s"]+\.(exe|ps1|bat|cmd|vbs|msi)' -AllMatches |
+    ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
+
+foreach ($p in $exec) {
+    (Get-Acl -LiteralPath $p).Access |
+        Where-Object { $_.FileSystemRights -match 'Write|Modify|FullControl' -and
+                       $_.IdentityReference -notmatch 'SYSTEM|Administrators|Domain Admins|Enterprise Admins|CREATOR OWNER' } |
+        Select-Object @{ n = 'Path'; e = { $p } }, IdentityReference, FileSystemRights
+}
+```
+
+Check the parent folders too, because if you can replace a file you can usually create one next to it. Taking the snapshot only needs read access to GPOs, which any domain user has by default, so blue teams should probably run this before somebody else does.
+
+You can also just go looking for known-bad configs, since you can search by the same setting names every audit report and hardening guide uses. SMBv1 not being disabled, SMB signing not required, NTLMv1 still allowed via the LAN Manager authentication level, RDP open to way more people than it should be, PowerShell script block logging only turned on for some machines. Search the setting name and look at what each GPO sets it to:
+
+```powershell
+'Configure SMBv1 server',
+'Microsoft network server: Digitally sign communications (always)',
+'LAN Manager authentication level',
+'Allow log on through Remote Desktop Services',
+'Turn on PowerShell Script Block Logging' | ForEach-Object {
+    Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString $_ |
+        Select-Object GPOName, Scope, Item, @{ n = 'Value'; e = { ($_.GpmcFields | Where-Object Name -eq 'Setting').Value } }
+}
+```
+
+Keep in mind that a setting nobody configured won't show up at all, and sometimes that missing result is the finding. Point is, whatever's on your list of bad stuff, you can surface it everywhere at once.
+
+And the big one. That User Rights Assignment search from the blue team section is a good place to start, because it shows who's been handed things like `Debug programs`, `Back up files and directories` or `Allow log on locally` in GPOs that apply to domain controllers. Any of those going to the wrong group on a DC is bad news. But the even bigger problem is the GPO itself. If anyone other than domain admins can **edit** a GPO that applies to the Domain Controllers OU at all, it doesn't really matter what that GPO currently configures. They can add a startup script or an immediate scheduled task to it, every DC will run it as SYSTEM on the next refresh, and that's the domain. The snapshot doesn't capture GPO permissions yet (see the end of the post), so for now this one's a live query with the GroupPolicy module:
+
+```powershell
+$dcOu = 'OU=Domain Controllers,' + ([ADSI]'LDAP://RootDSE').defaultNamingContext
+foreach ($link in (Get-GPInheritance -Target $dcOu).InheritedGpoLinks) {
+    Get-GPPermission -Guid $link.GpoId -All |
+        Where-Object { -not $_.Denied -and $_.Permission -in 'GpoEdit', 'GpoEditDeleteModifySecurity' -and
+                       $_.Trustee.Name -notin 'Domain Admins', 'Enterprise Admins', 'SYSTEM' } |
+        Select-Object @{ n = 'GPO'; e = { $link.DisplayName } }, @{ n = 'Trustee'; e = { $_.Trustee.Name } }, Permission
+}
+```
+
+`InheritedGpoLinks` includes the domain-level GPOs as well, since those hit DCs too. It doesn't include site-linked GPOs, and it won't expand nested group membership for you, so a harmless-looking group with edit rights still needs a look at who's actually in it.
+
+## Try it
+
+```powershell
+git clone https://github.com/cartergriffin/gpos.git
+cd gpos
+Import-Module .\gpos.psd1
+Get-MassiveGPOReportSnapshot -outPath C:\temp\gpo
+$jp = (Get-ChildItem C:\temp\gpo\all_gpos-*.json | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Public Key Policies'
+```
+
+You'll need a Windows machine with GPMC / RSAT Group Policy tools installed, since that's what puts `Microsoft.GroupPolicy.Reporting` in the GAC. Windows PowerShell 5.1 is the safest runtime for the path mapping. The first search renders and caches every item so it takes a while, after that it's all cached. `-NoGpmcPath` skips the path mapping if all you want is the raw string search.
+
+That's the useful part. The rest of this is how it works under the hood, and how long it took me to get there.
 
 ## Step 1, snapshot everything once
 
@@ -104,7 +252,7 @@ It just passes through to `_GPMGPO`, which is a COM interop type, and its `Gener
 
 ### Taking gpmgmt.dll apart
 
-Fun fact, 7-Zip will open PE files as archives (right-click, 7-Zip, Open archive), and you get every section and resource as its own file. `gpmgmt.dll` doesn't have a lot of resources. There's type library data, some COM registration scripts, version info, and an unnamed resource type `169` with two small items in it. `Format-Hex` showed both of those were XML, which was exciting for about four seconds until they turned out to be the backup schemas that `Backup-GPO` uses. I ran the scanner over the extracted `.rdata`, `.text` and `.data` sections and found no stylesheet and no "Public Key Policies".
+Fun fact, 7-Zip will open PE files (Portable Executable, the file format Windows uses for .exe and .dll files) as archives (right-click, 7-Zip, Open archive), and you get every section and resource as its own file. `gpmgmt.dll` doesn't have a lot of resources. There's type library data, some COM registration scripts, version info, and an unnamed resource type `169` with two small items in it. `Format-Hex` showed both of those were XML, which was exciting for about four seconds until they turned out to be the backup schemas that `Backup-GPO` uses. I ran the scanner over the extracted `.rdata`, `.text` and `.data` sections and found no stylesheet and no "Public Key Policies".
 
 `.rdata` was still worth it though. Dumping its strings turned up a bunch of debug/log messages that pretty much describe what the code does:
 
@@ -222,111 +370,22 @@ The runtime matters too. `Microsoft.GroupPolicy.Reporting` is .NET Framework cod
 
 And PowerShell was the slow part. Doing the splitting, flattening and matching per item in PowerShell took about 9 seconds per search, and loading plus parsing the snapshot was only half a second of that. Moving the indexing into C# (`private/GpoSnapshotIndex.cs`, compiled with `Add-Type` when the module loads) made it fast enough to actually use interactively.
 
-## Stuff you can do with it
-
-Once every setting in the domain has a GPMC path, a name, a raw value and a display value, a lot of annoying questions turn into one-liners. I tried to get something in here for sysadmins, blue team and red team.
-
-### Sysadmins
-
-The one I use most is finding where some old server is still referenced. UNC paths end up hiding in scripts, drive maps, printers, shortcuts, file copies and folder redirection, and one search covers all of them:
-
-```powershell
-Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'oldfs01' |
-    Select-Object GPOName, Scope, GpmcPath, Item
-```
-
-Same idea for startup scripts, this gets you every GPO that has them and what they run.
-
-```powershell
-Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Windows Settings > Scripts > Startup' |
-    Select-Object GPOName, Scope, GpmcPath, GpmcFields
-```
-
-And if you've ever wondered which GPOs are the big ones.
-
-```powershell
-Search-AllGPOSettingsDynamic -JsonPath $jp |
-    Where-Object GpmcPathStatus -in 'Ok', 'OkExtensionLevel' |
-    Group-Object GPOName | Sort-Object Count -Descending |
-    Select-Object -First 20 Count, Name
-```
-
-Overlap is the other big one. If you group results by `GpmcPath` and `Item` across GPOs, any group with more than one distinct value is two GPOs disagreeing about the same setting. That's basically every "it works in that OU but not this one" ticket I've ever gotten.
-
-### Blue team
-
-You can check a baseline the way it's actually written. Paste the path straight out of the CIS doc and see who sets it and to what:
-
-```powershell
-Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Security Options > Domain Controller' |
-    Select-Object GPOName, Item, @{ n = 'Value'; e = { ($_.GpmcFields | Where-Object Name -eq 'Setting').Value } }
-```
-
-Finding "allow everything" values is another good one, like ADMX edit boxes that someone set to `*`:
-
-```text
-PS> Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Allow unsolicited incoming messages' |
->>     Where-Object { $_.'EditText/Value' -eq '*' } |
->>     Select-Object GPOName, GpmcPath, 'EditText/State', 'EditText/Value'
-
-GPOName              GpmcPath                                                                   EditText/State EditText/Value
--------              --------                                                                   -------------- --------------
-Lab Workstation Base Policies > Administrative Templates > Network/Network Connections/Windows... Enabled        *
-```
-
-For broad principals in sensitive places, search for `Everyone` or `Authenticated Users` and filter `GpmcPath` down to `User Rights Assignment`, `Restricted Groups`, or the file system and registry ACLs.
-
-Certificates are in there too. Every cert pushed through Public Key Policies comes back as an item. The blob is a serialized certificate store element and not a bare DER cert, and property 32 inside it is the actual certificate. Decode that and sort by `NotAfter` and you'll find expired roots that are still getting deployed, and probably a couple intermediates nobody remembers adding.
-
-### Red team
-
-Group Policy Preferences passwords are still a thing. MS14-025 took away the ability to *set* them years ago but it never cleaned up the ones that were already there. `cpassword` is just an attribute, so it gets indexed as a pair name like anything else:
-
-```powershell
-Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'cpassword' |
-    Select-Object GPOName, Extension, ItemPath, Item
-```
-
-The other one is writable stuff that runs as SYSTEM. Startup scripts, scheduled tasks and software installs point at files on shares, and if a non-admin can write to one of those files that's code execution on every machine the GPO applies to. Pull every executed path out of the index and check the ACLs:
-
-```powershell
-$exec = Search-AllGPOSettingsDynamic -JsonPath $jp |
-    Where-Object Extension -in 'Scripts', 'ScheduledTasksSettings', 'SoftwareInstallationSettings' |
-    ForEach-Object { $_.GpmcFields.Value } |
-    Select-String -Pattern '\\\\[^\s"]+\.(exe|ps1|bat|cmd|vbs|msi)' -AllMatches |
-    ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
-
-foreach ($p in $exec) {
-    (Get-Acl -LiteralPath $p).Access |
-        Where-Object { $_.FileSystemRights -match 'Write|Modify|FullControl' -and
-                       $_.IdentityReference -notmatch 'SYSTEM|Administrators|Domain Admins|Enterprise Admins|CREATOR OWNER' } |
-        Select-Object @{ n = 'Path'; e = { $p } }, IdentityReference, FileSystemRights
-}
-```
-
-Check the parent folders too, because if you can replace a file you can usually create one next to it. Taking the snapshot only needs read access to GPOs, which any domain user has by default, so blue teams should probably run this before somebody else does.
-
 ## Compared to GPOZaurr
 
 [GPOZaurr](https://github.com/EvotecIT/GPOZaurr) is great and you should run it. It's built for GPO hygiene stuff like duplicate (CNF) objects, broken and disabled links, empty GPOs, ownership and permission problems, and AD vs SYSVOL consistency. Basically it tells you whether your Group Policy infrastructure is healthy.
 
-This is answering a different question, which is what each GPO actually configures (in the words GPMC uses) and where else that same thing is configured. It searches and compares at the setting level, and as far as I can tell GPOZaurr doesn't do that. I'd run both.
-
-## Try it
-
-```powershell
-git clone https://github.com/cartergriffin/gpos.git
-cd gpos
-Import-Module .\gpos.psd1
-Get-MassiveGPOReportSnapshot -outPath C:\temp\gpo
-$jp = (Get-ChildItem C:\temp\gpo\all_gpos-*.json | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
-Search-AllGPOSettingsDynamic -JsonPath $jp -SearchString 'Public Key Policies'
-```
-
-You'll need a Windows machine with GPMC / RSAT Group Policy tools installed, since that's what puts `Microsoft.GroupPolicy.Reporting` in the GAC. Windows PowerShell 5.1 is the safest runtime for the path mapping. The first search renders and caches every item so it takes a while, after that it's all cached. `-NoGpmcPath` skips the path mapping if all you want is the raw string search.
+It does look inside the settings too, its GPOAnalysis report sorts everything in your GPOs into 70+ categories using its own parsing. What it doesn't do is give you GPMC's actual paths and display text, or let you search by them. That's the gap this fills, what each GPO configures in the words GPMC (and every hardening guide) uses, and where else that same thing is configured. I'd run both.
 
 ## Stuff I'd tell myself before starting
 
 If the text isn't in the XML then something else is adding it, and it's way less work to find that thing and call it than to rebuild its rules by hand. Scan binaries in UTF-16LE too, since that's how Windows stores most of its strings. 7-Zip opens PE files, and the log strings in `.rdata` describe the code better than most of the docs do. Just because something's a native COM server doesn't mean it's native all the way down, so read every type library in the binary and not just the first one. Microsoft's symbol server hands out binaries as well as symbols, which is handy when you're not supposed to be copying files off a box. And check the output before digging into the internals. One regex on the HTML (`sectionTitle`) found more than an hour of DLL scanning did.
 
 I did most of this with Claude as a pair. It was fast at writing scanners and reading decompiled code, and it was also confidently wrong about where the engine lived more than once. Most of the progress came from not accepting "it's probably not possible" and running one more check. If you find a setting type that comes back `NotRendered` or `Error`, open an issue, that status is there so failures show up instead of getting quietly dropped.
+
+## What would make this better (PRs welcome)
+
+The biggest missing piece is permissions. Right now the index knows what every GPO configures, but not who can change it, and that's most of the red team value left on the table. The report XML already has a `SecurityDescriptor` section with the trustee permissions for each GPO, and a `LinksTo` section with every OU, domain or site it's linked to (plus whether the link is enabled or enforced). So a lot of this is plumbing, getting those onto each result next to `GpmcPath` and `GpmcFields`.
+
+Once that's in, the DC check above becomes one offline query. It also opens up the more general version of it, any GPO a non-admin can edit that runs code anywhere. That means startup scripts, scheduled tasks, software installs, services, or just a registry value that points at a binary, on any workstation or server, with the scope worked out from the links. Security filtering and WMI filters would round that out, so "linked to the OU" turns into "actually applies to these machines".
+
+A few other ACLs would be worth pulling in too. There's who can write `gPLink` on each OU (anyone who can link an existing GPO to the Domain Controllers OU is effectively in the same spot as someone who can edit one), the SYSVOL folder ACLs behind each GPO, since those files are what clients actually read, and owners of the GPO objects themselves. If any of that sounds fun, the repo's open and I'd love the help.
