@@ -1,7 +1,7 @@
 ---
-layout: post
 title: "Searching every GPO by the path GPMC shows you (and the DLL hunt it took to get there)"
-date: 2026-11-11 09:00:00 -0700
+date: 2026-11-11T09:00:00-07:00
+slug: searching-every-gpo-by-gpmc-path
 tags: [group-policy, powershell, active-directory, reverse-engineering, security]
 description: "A PowerShell module that indexes every setting in every GPO in a domain and lets you search by setting name, value, or the exact GPMC path a hardening guide tells you to go to. Plus the reverse engineering it took to rebuild those paths."
 ---

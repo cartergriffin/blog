@@ -1,7 +1,7 @@
 ---
-layout: post
 title: "Azure Devops + Internal Nuget server for powershell module publishing"
-date: 2026-02-08 20:26:33 -0700
+date: 2026-02-08T20:26:33-07:00
+slug: azure-devops-internal-nuget-server
 tags: [powershell, nuget, azure-devops]
 ---
 

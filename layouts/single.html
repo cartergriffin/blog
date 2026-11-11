@@ -1,0 +1,15 @@
+{{ define "main" }}
+<article>
+  <h1>{{ .Title }}</h1>
+  {{- if eq .Section "posts" }}
+  <p class="meta">
+    <time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "January 2, 2006" }}</time>
+    · {{ .ReadingTime }} min read
+    {{- with .GetTerms "tags" }} ·
+      {{- range . }} <a class="tag" href="{{ .RelPermalink }}">{{ .LinkTitle }}</a>{{ end }}
+    {{- end }}
+  </p>
+  {{- end }}
+  {{ .Content }}
+</article>
+{{ end }}

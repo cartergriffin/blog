@@ -1,0 +1,37 @@
+baseURL = "https://cartergriffin.github.io/blog/"
+locale = "en-us"
+title = "Carter Griffin"
+enableRobotsTXT = true
+titleCaseStyle = "none"
+
+[params]
+  description = "Windows, Active Directory, PowerShell and security notes from the field."
+  author = "Carter Griffin"
+  github = "https://github.com/cartergriffin"
+
+# Keep the URL shape the Jekyll site used, so links already shared keep working.
+[permalinks]
+  posts = "/:year/:month/:day/:slug/"
+
+[taxonomies]
+  tag = "tags"
+
+[menus]
+  [[menus.main]]
+    name = "Posts"
+    pageRef = "/posts"
+    weight = 10
+  [[menus.main]]
+    name = "Tags"
+    pageRef = "/tags"
+    weight = 20
+  [[menus.main]]
+    name = "About"
+    pageRef = "/about"
+    weight = 30
+
+[markup.highlight]
+  noClasses = false
+
+[markup.goldmark.renderer]
+  unsafe = false

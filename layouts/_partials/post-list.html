@@ -1,0 +1,9 @@
+<ul class="post-list">
+  {{- range . }}
+  <li>
+    <time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "Jan 2, 2006" }}</time>
+    <a class="post-link" href="{{ .RelPermalink }}">{{ .Title }}</a>
+    <p>{{ with .Description }}{{ . }}{{ else }}{{ .Summary | plainify | truncate 200 }}{{ end }}</p>
+  </li>
+  {{- end }}
+</ul>
