@@ -1,0 +1,26 @@
+title: Carter Griffin
+description: >-
+  Windows, Active Directory, PowerShell and security notes from the field.
+author: Carter Griffin
+
+# Served by GitHub Pages at https://cartergriffin.github.io/blog/
+url: "https://cartergriffin.github.io"
+baseurl: "/blog"
+
+theme: minima
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+
+permalink: /:year/:month/:day/:title/
+show_excerpts: true
+
+minima:
+  social_links:
+    github: cartergriffin
+
+header_pages:
+  - about.md
+
+exclude:
+  - README.md
