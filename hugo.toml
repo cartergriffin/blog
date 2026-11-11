@@ -5,7 +5,7 @@ enableRobotsTXT = true
 titleCaseStyle = "none"
 
 [params]
-  description = "Windows, Active Directory, PowerShell and security notes from the field."
+  description = "Notes on identity, platform engineering, Kubernetes, Active Directory and hardening."
   author = "Carter Griffin"
   github = "https://github.com/cartergriffin"
 
